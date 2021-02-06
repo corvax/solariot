@@ -37,7 +37,7 @@ from threading import Thread
 MIN_SIGNED   = -2147483648
 MAX_UNSIGNED =  4294967295
 
-requests.packages.urllib3.disable_warnings() 
+requests.packages.urllib3.disable_warnings()
 
 print ("Load config %s" % config.model)
 
@@ -77,23 +77,29 @@ print("Connect")
 client.connect()
 client.close()
 
-try: 
-  mqtt_client = mqtt.Client('pv_data')
-  if 'config.mqtt_username' in globals():
+if config.mqtt_enable:
+  try:
+    mqtt_client = mqtt.Client('pv_data')
+    if 'config.mqtt_username' in globals():
       mqtt_client.username_pw_set(config.mqtt_username,config.mqtt_password)
-  mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
-except:
+    mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
+  except:
+    mqtt_client = None
+else:
   mqtt_client = None
 
-try:
-  flux_client = InfluxDBClient(config.influxdb_ip,
-                               config.influxdb_port,
-                               config.influxdb_user,
-                               config.influxdb_password,
-                               config.influxdb_database,
-                               ssl=config.influxdb_ssl,
-                               verify_ssl=config.influxdb_verify_ssl)
-except:
+if config.influxdb_enable:
+  try:
+    flux_client = InfluxDBClient(config.influxdb_ip,
+                                 config.influxdb_port,
+                                 config.influxdb_user,
+                                 config.influxdb_password,
+                                 config.influxdb_database,
+                                 ssl=config.influxdb_ssl,
+                                 verify_ssl=config.influxdb_verify_ssl)
+  except:
+    flux_client = None
+else:
   flux_client = None
 
 inverter = {}
@@ -137,7 +143,7 @@ def load_sma_register(registers):
     startPos = thisrow[1]
     type = thisrow[2]
     format = thisrow[3]
-    
+
     ## if the connection is somehow not possible (e.g. target not responding)
     #  show a error message instead of excepting and stopping
     try:
@@ -149,7 +155,7 @@ def load_sma_register(registers):
       thiserrormessage = thisdate + ': Connection not possible. Check settings or connection.'
       print( thiserrormessage)
       return  ## prevent further execution of this function
-    
+
     message = BinaryPayloadDecoder.fromRegisters(received.registers, endian=Endian.Big)
     ## provide the correct result depending on the defined datatype
     if type == 'S32':
@@ -168,7 +174,7 @@ def load_sma_register(registers):
       interpreted = message.decode_16bit_uint()
     else: ## if no data type is defined do raw interpretation of the delivered data
       interpreted = message.decode_16bit_uint()
-    
+
     ## check for "None" data before doing anything else
     if ((interpreted == MIN_SIGNED) or (interpreted == MAX_UNSIGNED)):
       displaydata = None
@@ -182,10 +188,10 @@ def load_sma_register(registers):
         displaydata = float(interpreted) / 10
       else:
         displaydata = interpreted
-    
+
     #print '************** %s = %s' % (name, str(displaydata))
     inverter[name] = displaydata
-  
+
   # Add timestamp
   inverter["00000 - Timestamp"] = str(datetime.datetime.now()).partition('.')[0]
 
@@ -207,17 +213,57 @@ def publish_mqtt(inverter):
   except:
     result = None
 
+def publish_pvoutput(inverter):
+  try:
+    # PVOutput headers
+    headers = {
+        'X-Pvoutput-Apikey': "{0}".format(config.pvo_api),
+        'X-Pvoutput-SystemId': "{0}".format(config.pvo_sid),
+        'Content-Type': "application/x-www-form-urlencoded",
+        'cache-control': "no-cache"
+    }
+
+    # see https://pvoutput.org/help.html#api
+    # Post the following values
+    # v2 - Power Generation
+    # v4 - Power Consumption
+    # v6 - Voltage (we post Grid voltage)
+    v2 = inverter['total_pv_power']
+    v4 = inverter['power_meter']
+    v6 = inverter['grid_voltage']
+
+    now = datetime.datetime.now()
+
+    # build the querystring    
+    querystring = {
+      "d":"{0}".format(now.strftime("%Y%m%d")),
+      "t":"{0}".format(now.strftime("%H:%M")),
+      "v2":"{0}".format(v2),
+      "v4":"{0}".format(v4),
+      "v6":"{0}".format(v6)
+    }
+
+    # POST data
+    response = requests.request("POST", url=config.pvo_url, headers=headers, params=querystring)
+    if response.status_code != requests.codes.ok:
+      raise StandardError(response.text)
+    else:
+      print("Successfully posted to {0}".format(config.pvo_url))
+  except Exception as err:
+    #print ("[ERROR] pvoutput, %s" % err)
+    result = None
+
 while True:
   try:
     client.connect()
     inverter = {}
-    
+
     if 'sungrow-' in config.model:
       for i in bus['read']:
         load_registers("read",i['start'],i['range']) 
       for i in bus['holding']:
         load_registers("holding",i['start'],i['range']) 
-      
+
       # Sungrow inverter specifics:
       # Work out if the grid power is being imported or exported
       if config.model == "sungrow-sh5k" and \
@@ -231,18 +277,24 @@ while True:
             inverter['hour'],
             inverter['minute'],
             inverter['second'])
-    
+
     if 'sma-' in config.model:
       load_sma_register(modmap.sma_registers)
-    
+
     print (inverter)
+
+    if config.pvo_enable:
+      t = Thread(target=publish_pvoutput, args=(inverter,))
+      t.start()
 
     if mqtt_client is not None:
       t = Thread(target=publish_mqtt, args=(inverter,))
       t.start()
 
-    t = Thread(target=publish_dweepy, args=(inverter,))
-    t.start()
+    if config.dweepy_enable:
+      t = Thread(target=publish_dweepy, args=(inverter,))
+      t.start()
+
     if flux_client is not None:
       metrics = {}
       tags = {}

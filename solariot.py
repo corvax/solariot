@@ -33,13 +33,35 @@ import time
 import datetime
 import requests
 from threading import Thread
+import logging
 
 MIN_SIGNED   = -2147483648
 MAX_UNSIGNED =  4294967295
 
 requests.packages.urllib3.disable_warnings()
 
-print ("Load config %s" % config.model)
+# initialise logger
+logger = logging.getLogger('solariot')
+logger.setLevel(config.log_level)
+# formatting, same format for all handlers
+log_fmt = logging.Formatter('[%(asctime)s] [%(levelname)8s] %(message)s')
+
+# log to a console
+if config.log_console_enable:
+  log_sh = logging.StreamHandler()
+  log_sh.setLevel(config.log_level)
+  log_sh.setFormatter(log_fmt)
+  logger.addHandler(log_sh)
+
+# log to a file, e.g. /var/log/
+if config.log_file_enable:
+  log_fh = logging.FileHandler(config.log_filename)
+  log_fh.setLevel(config.log_level)
+  log_fh.setFormatter(log_fmt)
+  logger.addHandler(log_fh)
+
+logger.info('Starting solariot')
+logger.info ("Load config %s" % config.model)
 
 # SMA datatypes and their register lengths
 # S = Signed Number, U = Unsigned Number, STR = String
@@ -59,36 +81,41 @@ modmap = __import__(modmap_file)
 
 # This will try the Sungrow client otherwise will default to the standard library.
 if 'sungrow-' in config.model:
-    print ("Load SungrowModbusTcpClient")
+    logger.info ("Load SungrowModbusTcpClient")
     client = SungrowModbusTcpClient.SungrowModbusTcpClient(host=config.inverter_ip, 
                                             timeout=config.timeout, 
                                             RetryOnEmpty=True, 
                                             retries=3, 
                                             port=config.inverter_port)
 else:
-    print ("Load ModbusTcpClient")
+    logger.info ("Load ModbusTcpClient")
     client = ModbusTcpClient(host=config.inverter_ip, 
                              timeout=config.timeout, 
                              RetryOnEmpty=True, 
                              retries=3, 
                              port=config.inverter_port)
 
-print("Connect")
+logger.info("Connect")
 client.connect()
 client.close()
 
 if config.mqtt_enable:
   try:
+    logger.debug("Probing MQTT server...")
     mqtt_client = mqtt.Client('pv_data')
     if 'config.mqtt_username' in globals():
       mqtt_client.username_pw_set(config.mqtt_username,config.mqtt_password)
     mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
+    logger.debug("MQTT server detected")
   except:
     mqtt_client = None
+    logger.debug("MQTT server was not detected, check config file")
 else:
   mqtt_client = None
+  logger.debug("MQTT server is not enabled")
 
 if config.influxdb_enable:
+  logger.debug("Probing InfluxDB server...")
   try:
     flux_client = InfluxDBClient(config.influxdb_ip,
                                  config.influxdb_port,
@@ -97,16 +124,32 @@ if config.influxdb_enable:
                                  config.influxdb_database,
                                  ssl=config.influxdb_ssl,
                                  verify_ssl=config.influxdb_verify_ssl)
+    logger.debug("InfluxDB server detected")
   except:
     flux_client = None
+    logger.debug("InfluxDB server was not detected, check config file")
 else:
   flux_client = None
+  logger.debug("InfluxDB server is not enabled")
+
+# report if Dweet.io is enabled
+if config.dweepy_enable:
+  logger.debug("Dweet.io is enabled")
+else:
+  logger.debug("Dweet.io is not enabled")
+
+# report if PVOutput is enabled
+if config.pvo_enable:
+  logger.debug("PVOutput is enabled")
+else:
+  logger.debug("PVOutput is not enabled")
 
 inverter = {}
 bus = json.loads(modmap.scan)
 
 def load_registers(type,start,COUNT=100):
   try:
+    logger.debug("Read registers, type: {0}, start: {1}, count: {2}".format(type, start, COUNT))
     if type == "read":
       rr = client.read_input_registers(int(start), 
                                        count=int(COUNT), 
@@ -116,7 +159,7 @@ def load_registers(type,start,COUNT=100):
                                          count=int(COUNT), 
                                          unit=config.slave)
     if len(rr.registers) != int(COUNT):
-      print("[WARN] Mismatched number ({}) of registers read".format(len(rr.registers)))
+      logger.warn("Mismatched number ({}) of registers read".format(len(rr.registers)))
       return
     for num in range(0, int(COUNT)):
       run = int(start) + num + 1
@@ -128,7 +171,8 @@ def load_registers(type,start,COUNT=100):
       elif type == "holding" and modmap.holding_register.get(str(run)):
         inverter[modmap.holding_register.get(str(run))] = rr.registers[num]
   except Exception as err:
-    print("[WARN] No data. Try increasing the timeout or scan interval.")
+    logger.debug("Error: {0}".format(err))
+    logger.warn("No data. Try increasing the timeout or scan interval.")
 
 ## function for polling data from the target and triggering writing to log file if set
 #
@@ -153,7 +197,7 @@ def load_sma_register(registers):
     except:
       thisdate = str(datetime.datetime.now()).partition('.')[0]
       thiserrormessage = thisdate + ': Connection not possible. Check settings or connection.'
-      print( thiserrormessage)
+      logger.exception( thiserrormessage)
       return  ## prevent further execution of this function
 
     message = BinaryPayloadDecoder.fromRegisters(received.registers, endian=Endian.Big)
@@ -197,24 +241,25 @@ def load_sma_register(registers):
 
 def publish_influx(metrics):
   target=flux_client.write_points([metrics])
-  print ("[INFO] Sent to InfluxDB")
+  logger.info("Sent to InfluxDB")
 
 def publish_dweepy(inverter):
   try:
     result = dweepy.dweet_for(config.dweepy_uuid,inverter)
-    print("[INFO] Sent to dweet.io")
+    logger.info("Sent to dweet.io")
   except:
     result = None
 
 def publish_mqtt(inverter):
   try:
     result = mqtt_client.publish(config.mqtt_topic, json.dumps(inverter).replace('"', '\"'))
-    print("[INFO] Published to MQTT")
+    logger.info("Published to MQTT")
   except:
     result = None
 
 def publish_pvoutput(inverter):
   try:
+    logger.debug("Posting data to PVOutput")
     # PVOutput headers
     headers = {
         'X-Pvoutput-Apikey': "{0}".format(config.pvo_api),
@@ -246,11 +291,11 @@ def publish_pvoutput(inverter):
     # POST data
     response = requests.request("POST", url=config.pvo_url, headers=headers, params=querystring)
     if response.status_code != requests.codes.ok:
-      raise StandardError(response.text)
+      logger.error(response.text)
     else:
-      print("Successfully posted to {0}".format(config.pvo_url))
+      logger.info("Successfully posted to {0}".format(config.pvo_url))
   except Exception as err:
-    #print ("[ERROR] pvoutput, %s" % err)
+    logger.debug("Error: {0}".format(err))
     result = None
 
 while True:
@@ -258,6 +303,7 @@ while True:
     client.connect()
     inverter = {}
 
+    logger.debug("Reading data from the invertor")
     if 'sungrow-' in config.model:
       for i in bus['read']:
         load_registers("read",i['start'],i['range']) 
@@ -281,7 +327,7 @@ while True:
     if 'sma-' in config.model:
       load_sma_register(modmap.sma_registers)
 
-    print (inverter)
+    logger.debug("Inverter data: {0}".format(inverter))
 
     if config.pvo_enable:
       t = Thread(target=publish_pvoutput, args=(inverter,))
@@ -310,6 +356,8 @@ while True:
   except Exception as err:
     #Enable for debugging, otherwise it can be noisy and display false positives:
     #print ("[ERROR] %s" % err)
+    logger.debug("Error: {0}".format(err))
     client.close()
     client.connect()
+  logger.debug("Waiting {0} seconds before the next scan...".format(config.scan_interval))
   time.sleep(config.scan_interval)

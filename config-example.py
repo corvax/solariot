@@ -32,3 +32,8 @@ pvo_api = "api_key"
 pvo_sid = "system_id"
 # Post status
 pvo_url = "https://pvoutput.org/service/r2/addstatus.jsp"
+# Log settings
+log_level="DEBUG"
+log_console_enable = True
+log_file_enable = True
+log_filename="/var/log/solariot.log"

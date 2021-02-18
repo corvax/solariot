@@ -61,7 +61,7 @@ if config.log_file_enable:
   logger.addHandler(log_fh)
 
 logger.info('Starting solariot')
-logger.info ("Load config %s" % config.model)
+logger.debug("Load config %s" % config.model)
 
 # SMA datatypes and their register lengths
 # S = Signed Number, U = Unsigned Number, STR = String
@@ -81,14 +81,14 @@ modmap = __import__(modmap_file)
 
 # This will try the Sungrow client otherwise will default to the standard library.
 if 'sungrow-' in config.model:
-    logger.info ("Load SungrowModbusTcpClient")
+    logger.debug("Using SungrowModbusTcpClient")
     client = SungrowModbusTcpClient.SungrowModbusTcpClient(host=config.inverter_ip, 
                                             timeout=config.timeout, 
                                             RetryOnEmpty=True, 
                                             retries=3, 
                                             port=config.inverter_port)
 else:
-    logger.info ("Load ModbusTcpClient")
+    logger.debug("Using ModbusTcpClient")
     client = ModbusTcpClient(host=config.inverter_ip, 
                              timeout=config.timeout, 
                              RetryOnEmpty=True, 
@@ -101,21 +101,21 @@ client.close()
 
 if config.mqtt_enable:
   try:
-    logger.debug("Probing MQTT server...")
+    logger.debug("Output: MQTT, probing server...")
     mqtt_client = mqtt.Client('pv_data')
     if 'config.mqtt_username' in globals():
       mqtt_client.username_pw_set(config.mqtt_username,config.mqtt_password)
     mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
-    logger.debug("MQTT server detected")
+    logger.debug("Output: MQTT, server detected")
   except:
     mqtt_client = None
-    logger.debug("MQTT server was not detected, check config file")
+    logger.debug("Output: MQTT, server was not detected, check the config file")
 else:
   mqtt_client = None
-  logger.debug("MQTT server is not enabled")
+  logger.debug("Output: MQTT is not enabled")
 
 if config.influxdb_enable:
-  logger.debug("Probing InfluxDB server...")
+  logger.debug("Output: InfluxDB, probing server...")
   try:
     flux_client = InfluxDBClient(config.influxdb_ip,
                                  config.influxdb_port,
@@ -124,25 +124,29 @@ if config.influxdb_enable:
                                  config.influxdb_database,
                                  ssl=config.influxdb_ssl,
                                  verify_ssl=config.influxdb_verify_ssl)
-    logger.debug("InfluxDB server detected")
+    logger.debug("Output: InfluxDB, server detected")
   except:
     flux_client = None
-    logger.debug("InfluxDB server was not detected, check config file")
+    logger.debug("Output: InfluxDB, server was not detected, check the config file")
 else:
   flux_client = None
-  logger.debug("InfluxDB server is not enabled")
+  logger.debug("Output: InfluxDB is not enabled")
 
 # report if Dweet.io is enabled
 if config.dweepy_enable:
-  logger.debug("Dweet.io is enabled")
+  logger.debug("Output: Dweet.io is enabled")
 else:
-  logger.debug("Dweet.io is not enabled")
+  logger.debug("Output: Dweet.io is not enabled")
 
 # report if PVOutput is enabled
 if config.pvo_enable:
-  logger.debug("PVOutput is enabled")
+  logger.debug("Output: PVOutput is enabled")
 else:
-  logger.debug("PVOutput is not enabled")
+  logger.debug("Output: PVOutput is not enabled")
+
+# report if no output defined
+if not config.dweepy_enable and not config.influxdb_enable and not config.mqtt_enable and not config.pvo_enable:
+  logger.warn("No outputs enabled")
 
 inverter = {}
 bus = json.loads(modmap.scan)
@@ -253,13 +257,13 @@ def publish_dweepy(inverter):
 def publish_mqtt(inverter):
   try:
     result = mqtt_client.publish(config.mqtt_topic, json.dumps(inverter).replace('"', '\"'))
-    logger.info("Published to MQTT")
+    logger.info("Sent to MQTT")
   except:
     result = None
 
 def publish_pvoutput(inverter):
   try:
-    logger.debug("Posting data to PVOutput")
+    logger.debug("Output: sending to PVOutput")
     # PVOutput headers
     headers = {
         'X-Pvoutput-Apikey': "{0}".format(config.pvo_api),
@@ -293,13 +297,14 @@ def publish_pvoutput(inverter):
     if response.status_code != requests.codes.ok:
       logger.error(response.text)
     else:
-      logger.info("Successfully posted to {0}".format(config.pvo_url))
+      logger.info("Sent to PVOutput")
   except Exception as err:
     logger.debug("Error: {0}".format(err))
     result = None
 
 while True:
   try:
+    logger.debug("Connecting to the inverter")
     client.connect()
     inverter = {}
 
